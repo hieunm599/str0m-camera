@@ -511,6 +511,10 @@ impl StreamTx {
         params: &[PayloadParams],
         buf: &mut Vec<u8>,
     ) -> Option<PacketReceipt> {
+        #[cfg(feature = "pipeline-profile")]
+        let _span = crate::pipeline_profile::Span::new("rtp_build", 0);
+        #[cfg(feature = "work-profile")]
+        let _work = crate::work_profile::Span::new(crate::work_profile::Phase::RtpBuild, 0);
         let mid = self.midrid.mid();
         let rid = self.midrid.rid();
         let is_probe = self.ssrc.is_probe();

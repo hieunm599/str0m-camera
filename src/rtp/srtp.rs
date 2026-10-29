@@ -1,8 +1,8 @@
 use std::fmt;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 
-use crate::crypto::Aes128CmSha1_80Cipher;
 use crate::crypto::dtls::{KeyingMaterial, SrtpProfile};
+use crate::crypto::Aes128CmSha1_80Cipher;
 use crate::crypto::{AeadAes128Gcm, AeadAes256Gcm, Aes128CmSha1_80};
 use crate::crypto::{AeadAes128GcmCipher, AeadAes256GcmCipher};
 use crate::crypto::{CryptoProvider, Sha1HmacProvider, SrtpProvider};
@@ -209,6 +209,10 @@ impl SrtpContext {
         header: &RtpHeader,
         srtp_index: u64, // same as ext_seq
     ) -> Vec<u8> {
+        #[cfg(feature = "pipeline-profile")]
+        let _span = crate::pipeline_profile::Span::new("srtp_protect", buf.len());
+        #[cfg(feature = "work-profile")]
+        let _work = crate::work_profile::Span::gcm(crate::work_profile::GcmStage::Other, buf.len());
         // SRTP layout
         // [header, [rtp, (padding + pad_count)], tag]
 
@@ -253,8 +257,9 @@ impl SrtpContext {
                 let mut output =
                     vec![0_u8; buf.len() + Aes128CmSha1_80::HMAC_TAG_LEN + padding_needed];
 
-                enc.encrypt(&iv, input, &mut output[hlen..])
-                    .expect("rtp encrypt");
+                if enc.encrypt(&iv, input, &mut output[hlen..]).is_err() {
+                    return Vec::new();
+                }
 
                 output[..hlen].copy_from_slice(&buf[..hlen]);
 
@@ -266,19 +271,29 @@ impl SrtpContext {
                 output
             }
             Derived::AeadAes128Gcm { salt, enc, .. } => {
-                let roc = (srtp_index >> 16) as u32;
-
-                let iv = AeadAes128Gcm::rtp_iv(*salt, *header.ssrc, roc, header.sequence_number);
-                let aad = &buf[..hlen];
-
-                // Input and output lengths for encryption:
-                // https://www.rfc-editor.org/rfc/rfc7714#section-5.2.1
-                let mut output = vec![0_u8; buf.len() + AeadAes128Gcm::TAG_LEN];
-                enc.encrypt(&iv, aad, input, &mut output[hlen..])
-                    .expect("rtp encrypt");
-
-                output[..hlen].copy_from_slice(aad);
-
+                let (iv, aad) = {
+                    #[cfg(feature = "work-profile")]
+                    let _work = crate::work_profile::Span::gcm(crate::work_profile::GcmStage::Prepare, 0);
+                    let roc = (srtp_index >> 16) as u32;
+                    (AeadAes128Gcm::rtp_iv(*salt, *header.ssrc, roc, header.sequence_number), &buf[..hlen])
+                };
+                // Preserve the same output allocation and packet bytes.
+                let mut output = {
+                    #[cfg(feature = "work-profile")]
+                    let _work = crate::work_profile::Span::gcm(crate::work_profile::GcmStage::Allocate, buf.len() + AeadAes128Gcm::TAG_LEN);
+                    vec![0_u8; buf.len() + AeadAes128Gcm::TAG_LEN]
+                };
+                let encrypted = {
+                    #[cfg(feature = "work-profile")]
+                    let _work = crate::work_profile::Span::gcm(crate::work_profile::GcmStage::Provider, input.len());
+                    enc.encrypt(&iv, aad, input, &mut output[hlen..])
+                };
+                if encrypted.is_err() { return Vec::new(); }
+                {
+                    #[cfg(feature = "work-profile")]
+                    let _work = crate::work_profile::Span::gcm(crate::work_profile::GcmStage::Copy, hlen);
+                    output[..hlen].copy_from_slice(aad);
+                }
                 output
             }
             Derived::AeadAes256Gcm { salt, enc, .. } => {
@@ -290,8 +305,9 @@ impl SrtpContext {
                 // Input and output lengths for encryption:
                 // https://www.rfc-editor.org/rfc/rfc7714#section-5.2.1
                 let mut output = vec![0_u8; buf.len() + AeadAes256Gcm::TAG_LEN];
-                enc.encrypt(&iv, aad, input, &mut output[hlen..])
-                    .expect("rtp encrypt");
+                if enc.encrypt(&iv, aad, input, &mut output[hlen..]).is_err() {
+                    return Vec::new();
+                }
 
                 output[..hlen].copy_from_slice(aad);
 
@@ -414,6 +430,8 @@ impl SrtpContext {
     }
 
     pub fn protect_rtcp(&mut self, buf: &[u8]) -> Vec<u8> {
+        #[cfg(feature = "work-profile")]
+        let _work = crate::work_profile::Span::new(crate::work_profile::Phase::Srtcp, buf.len());
         let srtcp_index = self.srtcp_index;
 
         // https://tools.ietf.org/html/rfc3711#page-15
@@ -443,8 +461,9 @@ impl SrtpContext {
 
                 output[0..8].copy_from_slice(&buf[0..8]);
                 let input = &buf[8..];
-                enc.encrypt(&iv, input, &mut output[8..])
-                    .expect("rtcp encrypt");
+                if enc.encrypt(&iv, input, &mut output[8..]).is_err() {
+                    return Vec::new();
+                }
 
                 let to = &mut output[buf.len()..];
                 to[0..4].copy_from_slice(&e_and_si.to_be_bytes());
@@ -471,7 +490,9 @@ impl SrtpContext {
                 let enc_end = input.len() + 8 + AeadAes128Gcm::TAG_LEN;
                 let encout = &mut output[enc_start..enc_end];
 
-                enc.encrypt(&iv, &aad, input, encout).expect("rtcp encrypt");
+                if enc.encrypt(&iv, &aad, input, encout).is_err() {
+                    return Vec::new();
+                }
 
                 let to = &mut output[enc_end..];
                 to[0..4].copy_from_slice(&e_and_si.to_be_bytes());
@@ -493,7 +514,9 @@ impl SrtpContext {
                 let enc_end = input.len() + 8 + AeadAes256Gcm::TAG_LEN;
                 let encout = &mut output[enc_start..enc_end];
 
-                enc.encrypt(&iv, &aad, input, encout).expect("rtcp encrypt");
+                if enc.encrypt(&iv, &aad, input, encout).is_err() {
+                    return Vec::new();
+                }
 
                 let to = &mut output[enc_end..];
                 to[0..4].copy_from_slice(&e_and_si.to_be_bytes());
@@ -1538,6 +1561,88 @@ mod test {
                 rfc7714::SALT,
                 0x000005d4,
             )
+        }
+    }
+}
+
+#[cfg(test)]
+mod hardware_failure_tests {
+    use super::*;
+    use crate::crypto::CryptoError;
+    use crate::rtp::ExtensionMap;
+    #[derive(Debug)]
+    struct FailingCipher;
+    impl Aes128CmSha1_80Cipher for FailingCipher {
+        fn encrypt(&mut self, _: &[u8; 16], _: &[u8], _: &mut [u8]) -> Result<(), CryptoError> {
+            Err(CryptoError::Other("injected hardware failure".into()))
+        }
+        fn decrypt(&mut self, _: &[u8; 16], _: &[u8], _: &mut [u8]) -> Result<(), CryptoError> {
+            Err(CryptoError::Other("injected hardware failure".into()))
+        }
+    }
+    macro_rules! failing_gcm {
+        ($trait:ident) => {
+            impl $trait for FailingCipher {
+                fn encrypt(
+                    &mut self,
+                    _: &[u8; 12],
+                    _: &[u8],
+                    _: &[u8],
+                    _: &mut [u8],
+                ) -> Result<(), CryptoError> {
+                    Err(CryptoError::Other("injected hardware failure".into()))
+                }
+                fn decrypt(
+                    &mut self,
+                    _: &[u8; 12],
+                    _: &[&[u8]],
+                    _: &[u8],
+                    _: &mut [u8],
+                ) -> Result<usize, CryptoError> {
+                    Err(CryptoError::Other("injected hardware failure".into()))
+                }
+            }
+        };
+    }
+    failing_gcm!(AeadAes128GcmCipher);
+    failing_gcm!(AeadAes256GcmCipher);
+    fn derived(mode: u8) -> Derived {
+        match mode {
+            0 => Derived::Aes128CmSha1_80 {
+                key: [0; 20],
+                salt: [0; 14],
+                enc: Box::new(FailingCipher),
+                dec: Box::new(FailingCipher),
+            },
+            1 => Derived::AeadAes128Gcm {
+                salt: [0; 12],
+                enc: Box::new(FailingCipher),
+                dec: Box::new(FailingCipher),
+            },
+            _ => Derived::AeadAes256Gcm {
+                salt: [0; 12],
+                enc: Box::new(FailingCipher),
+                dec: Box::new(FailingCipher),
+            },
+        }
+    }
+    #[test]
+    fn encryption_errors_emit_no_rtp_or_rtcp_for_every_profile() {
+        crate::init_crypto_default();
+        let packet = [
+            0x80, 96, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0x55, 0x55, 0x55, 0x55,
+        ];
+        let header = RtpHeader::parse(&packet, &ExtensionMap::empty()).unwrap();
+        for mode in 0..3 {
+            let mut context = SrtpContext {
+                rtp: derived(mode),
+                rtcp: derived(mode),
+                srtcp_index: 0,
+                sha1_hmac_provider: crate::crypto::from_feature_flags().sha1_hmac_provider,
+                rx_scratch: Vec::new(),
+            };
+            assert!(context.protect_rtp(&packet, &header, 0).is_empty());
+            assert!(context.protect_rtcp(&packet).is_empty());
         }
     }
 }

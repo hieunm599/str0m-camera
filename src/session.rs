@@ -1111,6 +1111,8 @@ impl Session {
     }
 
     fn poll_feedback(&mut self) -> Option<net::DatagramSend> {
+        #[cfg(feature = "pipeline-profile")]
+        let _span = crate::pipeline_profile::Span::new("rtcp_output", 0);
         if self.feedback_tx.is_empty() {
             return None;
         }
@@ -1138,6 +1140,7 @@ impl Session {
 
         let srtp = self.srtp_tx.as_mut()?;
         let protected = srtp.protect_rtcp(&data);
+        if protected.is_empty() { return None; }
 
         assert!(
             protected.len() < self.mtu(),
@@ -1148,6 +1151,8 @@ impl Session {
     }
 
     fn poll_packet(&mut self, now: Instant) -> Option<DatagramSend> {
+        #[cfg(feature = "pipeline-profile")]
+        let _span = crate::pipeline_profile::Span::new("rtp_output", 0);
         let srtp_tx = self.srtp_tx.as_mut()?;
 
         // Figure out which, if any, queue to poll
@@ -1193,7 +1198,13 @@ impl Session {
             raw_packets.push_back(Box::new(RawPacket::RtpTx(header.clone(), buf.clone())));
         }
 
+        #[cfg(feature = "work-profile")]
+        let protected = crate::work_profile::with_media(media.kind().is_audio(), || {
+            srtp_tx.protect_rtp(buf, &header, *seq_no)
+        });
+        #[cfg(not(feature = "work-profile"))]
         let protected = srtp_tx.protect_rtp(buf, &header, *seq_no);
+        if protected.is_empty() { return None; }
 
         if twcc_enabled {
             let packet_id = if let Some(cluster) = cluster_id {
@@ -1387,6 +1398,10 @@ impl Session {
     }
 
     fn do_payload(&mut self, now: Instant) -> Result<(), RtcError> {
+        #[cfg(feature = "pipeline-profile")]
+        let _span = crate::pipeline_profile::Span::new("packetize", 0);
+        #[cfg(feature = "work-profile")]
+        let _work = crate::work_profile::Span::new(crate::work_profile::Phase::Packetize, 0);
         let mtu = self.mtu();
         for m in &mut self.medias {
             m.do_payload(

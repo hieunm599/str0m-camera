@@ -1,5 +1,5 @@
 [package]
-name = "str0m-rust-crypto"
+name = "str0m-rust-crypto-lumi"
 version = "0.6.0"
 authors = ["Martin Algesten <martin@algesten.se>"]
 description = "Pure Rust crypto backend for str0m WebRTC"
@@ -10,6 +10,12 @@ edition = "2024"
 
 # MSRV
 rust-version = "1.85.0"
+
+[lib]
+name = "str0m_rust_crypto"
+
+[features]
+work-profile = []
 
 [dependencies]
 str0m-proto = { workspace = true, features = ["dtls"] }

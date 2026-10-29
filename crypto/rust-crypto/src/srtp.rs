@@ -1,7 +1,7 @@
 //! SRTP cipher implementations using RustCrypto.
 
 use aes_gcm::aead::generic_array::GenericArray;
-use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce};
 use ctr::cipher::{KeyIvInit, StreamCipher};
 
@@ -85,15 +85,27 @@ impl AeadAes128GcmCipher for RustCryptoAeadAes128GcmCipher {
             "Associated data length MUST be at least 12 octets"
         );
 
-        let nonce = Nonce::from_slice(iv);
-        let payload = Payload { msg: input, aad };
-
-        let ciphertext = self
-            .cipher
-            .encrypt(nonce, payload)
-            .map_err(|e| CryptoError::Other(format!("AES-GCM encrypt failed: {:?}", e)))?;
-
-        output[..ciphertext.len()].copy_from_slice(&ciphertext);
+        let (payload, tag) = output
+            .get_mut(..input.len() + 16)
+            .ok_or_else(|| CryptoError::Other("AES-GCM output too short".into()))?
+            .split_at_mut(input.len());
+        {
+            #[cfg(feature = "work-profile")]
+            let _work = crate::work_profile::Span::gcm(crate::work_profile::GcmStage::Copy, input.len());
+            payload.copy_from_slice(input);
+        }
+        let auth_tag = {
+            #[cfg(feature = "work-profile")]
+            let _work = crate::work_profile::Span::gcm(crate::work_profile::GcmStage::Aead, input.len());
+            self.cipher
+                .encrypt_in_place_detached(Nonce::from_slice(iv), aad, payload)
+                .map_err(|e| CryptoError::Other(format!("AES-GCM encrypt failed: {:?}", e)))?
+        };
+        {
+            #[cfg(feature = "work-profile")]
+            let _work = crate::work_profile::Span::gcm(crate::work_profile::GcmStage::Copy, auth_tag.len());
+            tag.copy_from_slice(&auth_tag);
+        }
         Ok(())
     }
 
@@ -104,9 +116,6 @@ impl AeadAes128GcmCipher for RustCryptoAeadAes128GcmCipher {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<usize, CryptoError> {
-        // Caller contract: `SrtpContext::unprotect_rtp` and `unprotect_rtcp` guarantee
-        // the input holds at least the auth tag. A shorter buffer is a bug in str0m,
-        // not bad input, so fail fast rather than hiding it in an error.
         assert!(input.len() >= AeadAes128Gcm::TAG_LEN);
 
         let nonce = Nonce::from_slice(iv);
@@ -120,15 +129,20 @@ impl AeadAes128GcmCipher for RustCryptoAeadAes128GcmCipher {
             &aad_vec
         };
 
-        let payload = Payload { msg: input, aad };
-
-        let plaintext = self
-            .cipher
-            .decrypt(nonce, payload)
-            .map_err(|e| CryptoError::Other(format!("AES-GCM decrypt failed: {:?}", e)))?;
-
-        output[..plaintext.len()].copy_from_slice(&plaintext);
-        Ok(plaintext.len())
+        let payload_len = input.len() - AeadAes128Gcm::TAG_LEN;
+        let payload = output
+            .get_mut(..payload_len)
+            .ok_or_else(|| CryptoError::Other("AES-GCM output too short".into()))?;
+        payload.copy_from_slice(&input[..payload_len]);
+        let tag = GenericArray::from_slice(&input[payload_len..]);
+        if let Err(error) = self.cipher.decrypt_in_place_detached(nonce, aad, payload, tag) {
+            payload.fill(0);
+            return Err(CryptoError::Other(format!(
+                "AES-GCM decrypt failed: {:?}",
+                error
+            )));
+        }
+        Ok(payload_len)
     }
 }
 
@@ -159,15 +173,16 @@ impl AeadAes256GcmCipher for RustCryptoAeadAes256GcmCipher {
             "Associated data length MUST be at least 12 octets"
         );
 
-        let nonce = Nonce::from_slice(iv);
-        let payload = Payload { msg: input, aad };
-
-        let ciphertext = self
+        let (payload, tag) = output
+            .get_mut(..input.len() + 16)
+            .ok_or_else(|| CryptoError::Other("AES-GCM output too short".into()))?
+            .split_at_mut(input.len());
+        payload.copy_from_slice(input);
+        let auth_tag = self
             .cipher
-            .encrypt(nonce, payload)
+            .encrypt_in_place_detached(Nonce::from_slice(iv), aad, payload)
             .map_err(|e| CryptoError::Other(format!("AES-GCM encrypt failed: {:?}", e)))?;
-
-        output[..ciphertext.len()].copy_from_slice(&ciphertext);
+        tag.copy_from_slice(&auth_tag);
         Ok(())
     }
 
@@ -178,9 +193,6 @@ impl AeadAes256GcmCipher for RustCryptoAeadAes256GcmCipher {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<usize, CryptoError> {
-        // Caller contract: `SrtpContext::unprotect_rtp` and `unprotect_rtcp` guarantee
-        // the input holds at least the auth tag. A shorter buffer is a bug in str0m,
-        // not bad input, so fail fast rather than hiding it in an error.
         assert!(input.len() >= AeadAes256Gcm::TAG_LEN);
 
         let nonce = Nonce::from_slice(iv);
@@ -194,15 +206,20 @@ impl AeadAes256GcmCipher for RustCryptoAeadAes256GcmCipher {
             &aad_vec
         };
 
-        let payload = Payload { msg: input, aad };
-
-        let plaintext = self
-            .cipher
-            .decrypt(nonce, payload)
-            .map_err(|e| CryptoError::Other(format!("AES-GCM decrypt failed: {:?}", e)))?;
-
-        output[..plaintext.len()].copy_from_slice(&plaintext);
-        Ok(plaintext.len())
+        let payload_len = input.len() - AeadAes256Gcm::TAG_LEN;
+        let payload = output
+            .get_mut(..payload_len)
+            .ok_or_else(|| CryptoError::Other("AES-GCM output too short".into()))?;
+        payload.copy_from_slice(&input[..payload_len]);
+        let tag = GenericArray::from_slice(&input[payload_len..]);
+        if let Err(error) = self.cipher.decrypt_in_place_detached(nonce, aad, payload, tag) {
+            payload.fill(0);
+            return Err(CryptoError::Other(format!(
+                "AES-GCM decrypt failed: {:?}",
+                error
+            )));
+        }
+        Ok(payload_len)
     }
 }
 
@@ -324,5 +341,94 @@ impl SrtpProvider for RustCryptoSrtpProvider {
         let mut block2 = GenericArray::from([0x10u8; 16]);
         cipher.encrypt_block(&mut block2);
         output[16..32].copy_from_slice(&block2);
+    }
+}
+
+#[cfg(test)]
+mod in_place_tests {
+    use super::*;
+    use aes_gcm::aead::{Aead, Payload};
+
+    #[test]
+    fn gcm128_matches_reference_and_rejects_tampering() {
+        let key = [0x21; 16];
+        let iv = [0x36; 12];
+        let aad = b"rtp-header-12";
+        let plain = vec![0x52; 1201];
+        let reference = Aes128Gcm::new(GenericArray::from_slice(&key))
+            .encrypt(Nonce::from_slice(&iv), Payload { msg: &plain, aad })
+            .unwrap();
+        let mut cipher = RustCryptoAeadAes128GcmCipher {
+            cipher: Aes128Gcm::new(GenericArray::from_slice(&key)),
+        };
+        let mut encrypted = vec![0; plain.len() + 16];
+        cipher.encrypt(&iv, aad, &plain, &mut encrypted).unwrap();
+        assert_eq!(encrypted, reference);
+        let mut decoded = vec![0; plain.len()];
+        assert_eq!(
+            cipher.decrypt(&iv, &[aad], &encrypted, &mut decoded).unwrap(),
+            plain.len()
+        );
+        assert_eq!(decoded, plain);
+        encrypted[0] ^= 1;
+        assert!(cipher.decrypt(&iv, &[aad], &encrypted, &mut decoded).is_err());
+        assert!(decoded.iter().all(|byte| *byte == 0));
+        assert!(cipher.encrypt(&iv, aad, &plain, &mut encrypted[..16]).is_err());
+    }
+
+    #[cfg(feature = "work-profile")]
+    #[test]
+    fn profiled_gcm_preserves_bytes_and_classifies_media() {
+        use crate::work_profile::{Context, GcmStage, Span, with_media};
+        fn tick()->Option<u64> {
+            thread_local!{static T:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};}
+            Some(T.with(|t|{let v=t.get()+1;t.set(v);v}))
+        }
+        let key=[0x21;16];let iv=[0x36;12];let aad=b"rtp-header-12";
+        let mut cipher=RustCryptoAeadAes128GcmCipher{cipher:Aes128Gcm::new(GenericArray::from_slice(&key))};
+        let c=Context::begin(tick);
+        for (audio,len) in [(true,80),(false,1201)] {
+            let input=vec![0x52;len];let mut output=vec![0;len+16];
+            with_media(audio,||{
+                let _p=Span::gcm(GcmStage::Provider,len);
+                cipher.encrypt(&iv,aad,&input,&mut output).unwrap();
+            });
+            let expected=Aes128Gcm::new(GenericArray::from_slice(&key)).encrypt(Nonce::from_slice(&iv),Payload{msg:&input,aad}).unwrap();
+            assert_eq!(output,expected);
+        }
+        let ledger=c.finish();assert!(ledger.valid);
+        for (base,len) in [(12,80),(18,1201)] {
+            assert_eq!(ledger.calls[base+4],1);assert_eq!(ledger.bytes[base+4],len);
+            assert_eq!(ledger.calls[base+3],2);assert_eq!(ledger.bytes[base+3],len+16);
+            assert!(ledger.cpu[base+4]>0);
+        }
+        assert_eq!(ledger.calls[2],0);
+    }
+
+    #[test]
+    fn gcm256_matches_reference_and_rejects_tampering() {
+        let key = [0x42; 32];
+        let iv = [0x63; 12];
+        let aad = b"rtp-header-12";
+        let plain = vec![0x53; 1201];
+        let reference = Aes256Gcm::new(GenericArray::from_slice(&key))
+            .encrypt(Nonce::from_slice(&iv), Payload { msg: &plain, aad })
+            .unwrap();
+        let mut cipher = RustCryptoAeadAes256GcmCipher {
+            cipher: Aes256Gcm::new(GenericArray::from_slice(&key)),
+        };
+        let mut encrypted = vec![0; plain.len() + 16];
+        cipher.encrypt(&iv, aad, &plain, &mut encrypted).unwrap();
+        assert_eq!(encrypted, reference);
+        let mut decoded = vec![0; plain.len()];
+        assert_eq!(
+            cipher.decrypt(&iv, &[aad], &encrypted, &mut decoded).unwrap(),
+            plain.len()
+        );
+        assert_eq!(decoded, plain);
+        encrypted[0] ^= 1;
+        assert!(cipher.decrypt(&iv, &[aad], &encrypted, &mut decoded).is_err());
+        assert!(decoded.iter().all(|byte| *byte == 0));
+        assert!(cipher.encrypt(&iv, aad, &plain, &mut encrypted[..16]).is_err());
     }
 }

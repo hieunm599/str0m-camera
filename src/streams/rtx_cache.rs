@@ -30,6 +30,8 @@ impl RtxCache {
     }
 
     pub fn cache_sent_packet(&mut self, packet: RtpPacket, now: Instant) {
+        #[cfg(feature = "pipeline-profile")]
+        let _span = crate::pipeline_profile::Span::new("rtx_cache_insert", 0);
         assert!(packet.nackable);
         let seq_no = packet.seq_no;
         let quantized_size = packet.payload.len() / RTX_CACHE_SIZE_QUANTIZER;
@@ -43,6 +45,8 @@ impl RtxCache {
     }
 
     pub fn get_cached_packet_by_seq_no(&mut self, seq_no: SeqNo) -> Option<&mut RtpPacket> {
+        #[cfg(feature = "pipeline-profile")]
+        let _span = crate::pipeline_profile::Span::new("rtx_cache_lookup", 0);
         self.packet_by_seq_no.get_mut(*seq_no)
     }
 

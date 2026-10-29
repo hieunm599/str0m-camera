@@ -1,5 +1,5 @@
 [package]
-name = "str0m"
+name = "str0m-lumi"
 version = "0.24.1"
 authors = ["Martin Algesten <martin@algesten.se>", "Hugo Tunius <h@tunius.se>", "Davide Bertola <dade@dadeb.it>"]
 description = "WebRTC library in Sans-IO style"
@@ -23,6 +23,9 @@ rust-version = "1.85.0"
 # For large deployments sharing OS images, OS updates can be easier for
 # security patching than updating statically linked software.
 
+[lib]
+name = "str0m"
+
 [workspace]
 members = [
   "crates/proto",
@@ -39,12 +42,12 @@ exclude = ["crates/fuzz"]
 
 [workspace.dependencies]
 # Internal crates
-str0m = { version = "0.24.1", path = ".", default-features = false }
-str0m-proto = { version = "0.7.0", path = "crates/proto", default-features = false }
-is = { version = "0.11.1", path = "crates/is", default-features = false }
+str0m = { package = "str0m-lumi", version = "=0.24.1", path = ".", default-features = false }
+str0m-proto = { version = "=0.7.0", default-features = false }
+is = { version = "=0.11.1", default-features = false }
 str0m-netem = { version = "0.4.0", path = "crates/netem" }
 str0m-aws-lc-rs = { version = "0.6.0", path = "crypto/aws-lc-rs" }
-str0m-rust-crypto = { version = "0.6.0", path = "crypto/rust-crypto" }
+str0m-rust-crypto = { package = "str0m-rust-crypto-lumi", version = "=0.6.0", path = "crypto/rust-crypto" }
 str0m-openssl = { version = "0.6.0", path = "crypto/openssl" }
 str0m-apple-crypto = { version = "0.6.0", path = "crypto/apple-crypto" }
 str0m-wincrypto = { version = "0.8.1", path = "crypto/wincrypto" }
@@ -58,7 +61,7 @@ combine = "4.6.6"
 subtle = "2.0.0"
 arrayvec = "0.7.6"
 serde = { version = "1.0.152", features = ["derive"] }
-dimpl = { version = "0.7.4", default-features = false }
+dimpl = { version = "=0.7.5", default-features = false }
 drv = { version = "0.4.3" }
 time = "0.3"
 base64ct = "1"
@@ -98,6 +101,8 @@ regex = "1.11.1"
 rand = "0.9.0"
 
 [features]
+pipeline-profile = []
+work-profile = ["dep:str0m-rust-crypto", "str0m-rust-crypto/work-profile"]
 default = ["aws-lc-rs", "examples"]
 aws-lc-rs = ["dep:str0m-aws-lc-rs"]
 rust-crypto = ["dep:str0m-rust-crypto"]

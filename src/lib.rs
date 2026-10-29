@@ -671,6 +671,13 @@
 #![allow(mismatched_lifetime_syntaxes)]
 #![deny(clippy::needless_pass_by_ref_mut)]
 #![deny(missing_docs)]
+/// Local diagnostic instrumentation, absent from normal builds.
+#[cfg(feature = "pipeline-profile")]
+pub mod pipeline_profile;
+/// Sampled exclusive CPU diagnostics, absent from normal builds.
+#[cfg(feature = "work-profile")]
+pub mod work_profile;
+
 
 #[macro_use]
 extern crate tracing;
