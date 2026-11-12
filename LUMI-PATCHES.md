@@ -39,7 +39,9 @@ and target ABI. Build/host correctness is not board CPU/FPS qualification.
 
 ## Ported source hashes
 
-These hashes must match the pre-migration application source byte for byte.
+These hashes record the historical pre-migration application source bytes.
+The follow-up sender-report correction below intentionally changes
+`src/streams/send.rs`; the other listed source files remain unchanged.
 
 - `crypto/rust-crypto/src/lib.rs`: `02ee281a4dbff47304acf6ab7fb975da7b1e5375397002a08a4dff25fc95f677`
 - `crypto/rust-crypto/src/srtp.rs`: `7dcc2395b9cad1bcf9cc51a3b268179063bea99fd57a60f28e6f3fa514349e92`
@@ -51,3 +53,17 @@ These hashes must match the pre-migration application source byte for byte.
 - `src/streams/rtx_cache.rs`: `90f357ada5916f112632bbf552e50567e4b3d8fdda3507006d383660923100ef`
 - `src/streams/send.rs`: `322c5bc631ddbf9521165d6dd39c28711407a60b25e1229f4d91a71d723d1017`
 - `src/work_profile.rs`: `5df27b68809efc9f72a81150d7304a26fb9b6e61e5b8f84cba2fcea17851969a`
+
+## Initial RTCP clock correction
+
+Follow-up source commit `ac7e418` defers the first sender report until a
+media clock and clock rate exist, and respects a future capture timestamp.
+A legitimate RTP timestamp of zero remains valid after clock initialization.
+This avoids emitting reports with a fabricated zero clock before media.
+
+Validation: 758 RustCrypto library unit tests passed. A negotiated transport
+probe observed three empty-clock sender reports before media on the previous
+revision and none with this correction; valid reports followed media in both
+variants. This is host protocol evidence, not camera FPS qualification.
+Changed-file rustfmt and diff checks passed; repository-wide formatting has
+pre-existing differences in unrelated files.
