@@ -950,11 +950,18 @@ impl StreamTx {
     }
 
     pub(crate) fn sender_report_at(&self, intervals: RtcpReportIntervals) -> Instant {
-        if self.kind.is_none() {
-            // First handle_timeout sets the kind. No sender report until then.
+        if self.kind.is_none() || self.clock_rate.is_none() {
+            // Negotiation alone does not establish an RTP clock. Publishing a
+            // zero fallback before the first media sample gives receivers a
+            // false RTP/NTP synchronization point.
             return not_happening();
         }
-        self.last_sender_report + intervals.for_audio(self.is_audio())
+        let Some((_, captured_at)) = self.rtp_and_wallclock else {
+            return not_happening();
+        };
+        // A caller may enqueue a sample before the RTC clock reaches its
+        // capture time. Wait for a valid clock mapping instead of reporting 0.
+        (self.last_sender_report + intervals.for_audio(self.is_audio())).max(captured_at)
     }
 
     pub(crate) fn poll_keyframe_request(&mut self) -> Option<KeyframeRequestKind> {
@@ -1509,6 +1516,8 @@ mod test {
         let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), false, 1200);
         let now = Instant::now();
         stream.kind = Some(MediaKind::Audio);
+        stream.clock_rate = Some(Frequency::FORTY_EIGHT_KHZ);
+        stream.rtp_and_wallclock = Some((48_000, now));
         stream.last_sender_report = now;
 
         assert_eq!(
@@ -1517,6 +1526,49 @@ mod test {
                 video: Duration::from_millis(500),
             }),
             now + Duration::from_millis(750)
+        );
+    }
+
+    #[test]
+    fn sender_report_waits_for_a_valid_rtp_clock() {
+        let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), false, 1200);
+        let now = Instant::now();
+        let intervals = RtcpReportIntervals {
+            audio: Duration::from_millis(750),
+            video: Duration::from_millis(500),
+        };
+        assert!(!stream.need_sr(now, intervals));
+        stream.kind = Some(MediaKind::Audio);
+        assert!(
+            !stream.need_sr(now, intervals),
+            "negotiation is not a clock sample"
+        );
+        stream.rtp_and_wallclock = Some((48_000, now));
+        assert!(
+            !stream.need_sr(now, intervals),
+            "the RTP clock rate is still unknown"
+        );
+        stream.clock_rate = Some(Frequency::FORTY_EIGHT_KHZ);
+        assert!(stream.need_sr(now, intervals));
+        assert_eq!(stream.sender_info(now).rtp_time.numer(), 48_000);
+
+        let capture = now + Duration::from_secs(2);
+        stream.last_sender_report = now;
+        stream.rtp_and_wallclock = Some((96_000, capture));
+        assert_eq!(stream.sender_report_at(intervals), capture);
+        assert!(!stream.need_sr(now + Duration::from_millis(750), intervals));
+        assert!(stream.need_sr(capture, intervals));
+        assert_eq!(stream.sender_info(capture).rtp_time.numer(), 96_000);
+
+        // Zero is a valid RTP counter when an actual clock mapping exists.
+        stream.rtp_and_wallclock = Some((0, now));
+        stream.last_sender_report = already_happened();
+        assert!(stream.need_sr(now, intervals));
+        assert_eq!(stream.current_rtp_time(now).unwrap().numer(), 0);
+        stream.rtp_and_wallclock = None;
+        assert!(
+            !stream.need_sr(now, intervals),
+            "no repeated immediate timeout without a clock"
         );
     }
 }
